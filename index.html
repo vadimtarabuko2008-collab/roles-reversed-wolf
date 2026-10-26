@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#11170f" />
+    <meta
+      name="description"
+      content="Roles Reversed Wolf — браузерная игра о волке, который прячется среди овец."
+    />
+    <title>Roles Reversed Wolf</title>
+  </head>
+  <body>
+    <div id="game" aria-label="Игровое поле"></div>
+
+    <header class="hud" aria-live="polite">
+      <div class="brand">ROLES REVERSED</div>
+      <div class="hud__stats">
+        <span id="phase">День</span>
+        <span id="time">00:00</span>
+        <span id="sheep">Добыча: 0 / 4</span>
+        <span id="health">Здоровье: 6 / 6</span>
+      </div>
+    </header>
+
+    <section class="status-panel">
+      <div id="form">Маскировка: надета</div>
+      <div id="danger">Подозрение: низкое</div>
+      <div class="progress" aria-hidden="true"><div id="change-progress"></div></div>
+      <div id="hint">Двигайтесь WASD или стрелками</div>
+    </section>
+
+    <section id="overlay" class="overlay">
+      <div class="card">
+        <p class="eyebrow">FEIS GAME JAM · ROLES REVERSED</p>
+        <h1 id="overlay-title">Волк в овечьей шкуре</h1>
+        <p id="overlay-text">
+          Днём смешивайтесь со стадом и выбирайте момент для охоты. Ночью сторожевой пёс
+          становится активнее — теперь охотятся уже на вас.
+        </p>
+        <div class="controls">
+          <span><kbd>WASD</kbd> движение</span>
+          <span><kbd>F</kbd> удерживать 3 с — переодеться</span>
+          <span><kbd>Пробел</kbd> забрать овцу без маскировки</span>
+          <span><kbd>R</kbd> начать заново</span>
+        </div>
+        <button id="start" type="button">Начать забег</button>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
