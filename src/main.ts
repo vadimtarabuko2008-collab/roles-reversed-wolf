@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import './style.css';
 
 type Phase = 'День' | 'Сумерки' | 'Ночь' | 'Рассвет';
@@ -17,6 +19,7 @@ interface Sheep {
   carriedBy: 'player' | 'rival' | null;
   bobOffset: number;
   bell: boolean;
+  panicMemory: number;
 }
 
 interface ScentMark {
@@ -43,6 +46,20 @@ interface Rival {
   attackWindup: number;
 }
 
+interface AnimatedRig {
+  mixer: THREE.AnimationMixer;
+  actions: Map<string, THREE.AnimationAction>;
+  current?: THREE.AnimationAction;
+  currentName?: string;
+}
+
+interface AmbientAnimal {
+  mesh: THREE.Group;
+  velocity: THREE.Vector3;
+  wanderDirection: THREE.Vector3;
+  turnIn: number;
+}
+
 const MAP_W = 32;
 const MAP_H = 24;
 const GOAL = 4;
@@ -64,6 +81,7 @@ const ui = {
   danger: required('danger'),
   rival: required('rival-status'),
   dash: required('dash-status'),
+  models: required('models-status'),
   hint: required('hint'),
   progress: required('change-progress'),
   sound: requiredButton('sound'),
@@ -87,10 +105,12 @@ function requiredButton(id: string): HTMLButtonElement {
 
 class PrototypeGame {
   private readonly scene = new THREE.Scene();
-  private readonly camera: THREE.OrthographicCamera;
+  private readonly camera: THREE.PerspectiveCamera;
   private readonly renderer = new THREE.WebGLRenderer({ antialias: true });
+  private readonly loader = new GLTFLoader();
   private readonly clock = new THREE.Clock();
   private readonly keys = new Set<string>();
+  private readonly pressed = new Set<string>();
   private readonly sheep: Sheep[] = [];
   private readonly scents: ScentMark[] = [];
   private readonly obstacles: Obstacle[] = [];
@@ -109,8 +129,12 @@ class PrototypeGame {
   private readonly shepherd = this.createShepherd();
   private readonly sun = new THREE.DirectionalLight(0xffedc7, 2.1);
   private readonly sky = new THREE.HemisphereLight(0xc7e9ff, 0x344223, 1.6);
+  private readonly lanterns: THREE.PointLight[] = [];
   private readonly cameraTarget = new THREE.Vector3();
+  private readonly rigs = new Map<THREE.Object3D, AnimatedRig>();
+  private readonly ambientAnimals: AmbientAnimal[] = [];
   private readonly playerVelocity = new THREE.Vector3();
+  private readonly dashDirection = new THREE.Vector3(1, 0, 0);
   private readonly dogVelocity = new THREE.Vector3();
   private readonly dogFacing = new THREE.Vector3(1, 0, 0);
   private readonly dogLastSeen = new THREE.Vector3();
@@ -180,6 +204,15 @@ class PrototypeGame {
   private paused = false;
   private audioContext?: AudioContext;
   private soundEnabled = true;
+  private feedbackMessage = '';
+  private feedbackTime = 0;
+  private modelStatus = 'Загрузка временных 3D-моделей…';
+  private cameraYaw = Math.PI * .25;
+  private cameraPitch = THREE.MathUtils.degToRad(49);
+  private cameraDistance = 25;
+  private cameraDragging = false;
+  private cameraPointerX = 0;
+  private cameraPointerY = 0;
 
   constructor(container: HTMLElement) {
     try {
@@ -190,9 +223,8 @@ class PrototypeGame {
     ui.sound.textContent = `Звук: ${this.soundEnabled ? 'вкл' : 'выкл'}`;
     ui.sound.setAttribute('aria-pressed', String(this.soundEnabled));
     const aspect = window.innerWidth / window.innerHeight;
-    const view = 18;
-    this.camera = new THREE.OrthographicCamera(-view * aspect, view * aspect, view, -view, 0.1, 100);
-    this.camera.position.set(18, 23, 18);
+    this.camera = new THREE.PerspectiveCamera(42, aspect, .1, 120);
+    this.camera.position.set(18, 20, 18);
     this.camera.lookAt(0, 0, 0);
 
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
@@ -204,6 +236,7 @@ class PrototypeGame {
 
     this.buildWorld();
     this.bindEvents();
+    void this.loadModels();
     this.reset();
     this.renderer.setAnimationLoop(() => this.frame());
   }
@@ -221,6 +254,7 @@ class PrototypeGame {
 
   private reset(): void {
     this.keys.clear();
+    this.pressed.clear();
     this.finished = false;
     this.running = false;
     this.elapsed = 0;
@@ -252,6 +286,7 @@ class PrototypeGame {
     this.playerHeldElapsed = 0;
     this.dashCooldown = 0;
     this.dashTime = 0;
+    this.dashDirection.set(1, 0, 0);
     this.scentTimer = 0;
     this.disguiseScentTail = 0;
     this.scents.length = 0;
@@ -284,6 +319,8 @@ class PrototypeGame {
     this.nextRivalSpawn = 66;
     this.dashHitRival = false;
     this.paused = false;
+    this.feedbackMessage = '';
+    this.feedbackTime = 0;
     this.previousPhase = 'День';
     this.phase = 'День';
     this.setDisguiseVisual();
@@ -308,6 +345,27 @@ class PrototypeGame {
     this.sun.shadow.mapSize.set(1024, 1024);
     this.scene.add(this.sun, this.sky);
 
+    const lanternMaterial = new THREE.MeshStandardMaterial({
+      color: 0xffc36a,
+      emissive: 0xff8a2b,
+      emissiveIntensity: 1.8,
+      roughness: .45,
+    });
+    for (const [x, z] of [[-13, -9], [10, -8], [-12, 8], [11, 8], [0, -10]] as const) {
+      const post = new THREE.Mesh(
+        new THREE.CylinderGeometry(.07, .09, 1.7, 7),
+        new THREE.MeshStandardMaterial({ color: 0x4d3422, roughness: 1 }),
+      );
+      post.position.set(x, .85, z);
+      const glow = new THREE.Mesh(new THREE.SphereGeometry(.13, 9, 7), lanternMaterial);
+      glow.position.set(x, 1.72, z);
+      const light = new THREE.PointLight(0xffa34d, .35, 9, 1.7);
+      light.position.set(x, 1.7, z);
+      light.castShadow = false;
+      this.lanterns.push(light);
+      this.scene.add(post, glow, light);
+    }
+
     this.scene.add(this.wolf, this.dog, this.rival.mesh, this.shepherd);
     for (let i = 0; i < 8; i += 1) {
       const sheep: Sheep = {
@@ -320,6 +378,7 @@ class PrototypeGame {
         carriedBy: null,
         bobOffset: random(0, Math.PI * 2),
         bell: i === 0,
+        panicMemory: 0,
       };
       this.sheep.push(sheep);
       this.scene.add(sheep.mesh);
@@ -364,6 +423,175 @@ class PrototypeGame {
       );
       tuft.position.set(random(-15, 15), .2, random(-11, 11));
       this.scene.add(tuft);
+    }
+  }
+
+  private async loadModels(): Promise<void> {
+    try {
+      const [wolfAsset, huskyAsset, foxAsset, sheepAsset, donkeyAsset, cowAsset, farmAsset] = await Promise.all([
+        this.loader.loadAsync('/assets/models/wolf.gltf'),
+        this.loader.loadAsync('/assets/models/husky.gltf'),
+        this.loader.loadAsync('/assets/models/fox.gltf'),
+        this.loader.loadAsync('/assets/models/sheep-placeholder.gltf'),
+        this.loader.loadAsync('/assets/models/donkey.gltf'),
+        this.loader.loadAsync('/assets/models/cow.gltf'),
+        this.loader.loadAsync('/assets/models/farmyard.glb'),
+      ]);
+
+      this.installRig(this.wolf, wolfAsset.scene, wolfAsset.animations, 1.55, Math.PI / 2, ['coat']);
+      this.installRig(this.dog, huskyAsset.scene, huskyAsset.animations, 1.35, Math.PI / 2, ['attention']);
+      this.installRig(this.rival.mesh, foxAsset.scene, foxAsset.animations, 1.3, Math.PI / 2, ['attack-warning']);
+      for (const sheep of this.sheep) {
+        this.installRig(
+          sheep.mesh,
+          sheepAsset.scene,
+          sheepAsset.animations,
+          1.12,
+          Math.PI / 2,
+          sheep.bell ? ['bell'] : [],
+        );
+      }
+
+      const ambientSpecs = [
+        { source: donkeyAsset.scene, clips: donkeyAsset.animations, height: 1.55, position: new THREE.Vector3(-12, 0, -8) },
+        { source: cowAsset.scene, clips: cowAsset.animations, height: 1.65, position: new THREE.Vector3(11, 0, 7) },
+      ];
+      for (const spec of ambientSpecs) {
+        const mesh = new THREE.Group();
+        mesh.position.copy(spec.position);
+        this.scene.add(mesh);
+        this.installRig(mesh, spec.source, spec.clips, spec.height, Math.PI / 2, []);
+        const angle = random(0, Math.PI * 2);
+        this.ambientAnimals.push({
+          mesh,
+          velocity: new THREE.Vector3(),
+          wanderDirection: new THREE.Vector3(Math.cos(angle), 0, Math.sin(angle)),
+          turnIn: random(2, 5),
+        });
+      }
+
+      const farmyard = cloneSkeleton(farmAsset.scene);
+      farmyard.name = 'farmyard-backdrop';
+      farmyard.scale.setScalar(1.05);
+      farmyard.position.set(-1.5, 0, -17);
+      farmyard.rotation.y = -.06;
+      farmyard.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+      this.scene.add(farmyard);
+      this.modelStatus = 'Модели: Wolf · Husky · Fox · Alpaca · Donkey · Cow';
+    } catch (error) {
+      console.error('Не удалось загрузить временные модели', error);
+      this.modelStatus = 'Модели: процедурный резерв (ошибка загрузки)';
+    }
+    this.updateUi();
+  }
+
+  private installRig(
+    actor: THREE.Group,
+    source: THREE.Object3D,
+    clips: THREE.AnimationClip[],
+    targetHeight: number,
+    rotationY: number,
+    keepNames: string[],
+  ): void {
+    const model = cloneSkeleton(source);
+    model.name = 'animated-model';
+    model.rotation.y = rotationY;
+    model.updateMatrixWorld(true);
+    const initialBox = new THREE.Box3().setFromObject(model);
+    const initialHeight = Math.max(.001, initialBox.max.y - initialBox.min.y);
+    model.scale.setScalar(targetHeight / initialHeight);
+    model.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    model.position.set(-center.x, -box.min.y, -center.z);
+    model.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        child.frustumCulled = false;
+      }
+    });
+
+    for (const child of actor.children) {
+      if (!keepNames.includes(child.name)) child.visible = false;
+    }
+    actor.add(model);
+
+    const mixer = new THREE.AnimationMixer(model);
+    const actions = new Map<string, THREE.AnimationAction>();
+    for (const clip of clips) actions.set(clip.name, mixer.clipAction(clip));
+    this.rigs.set(actor, { mixer, actions });
+    this.setRigAnimation(actor, ['Idle', 'Idle_2']);
+  }
+
+  private setRigAnimation(actor: THREE.Object3D, candidates: string[], speed = 1): void {
+    const rig = this.rigs.get(actor);
+    if (!rig) return;
+    const name = candidates.find((candidate) => rig.actions.has(candidate));
+    if (!name || rig.currentName === name) {
+      if (rig.current) rig.current.timeScale = speed;
+      return;
+    }
+    const next = rig.actions.get(name);
+    if (!next) return;
+    next.reset().setEffectiveTimeScale(speed).fadeIn(.16).play();
+    rig.current?.fadeOut(.16);
+    rig.current = next;
+    rig.currentName = name;
+  }
+
+  private updateRigAnimations(dt: number): void {
+    for (const rig of this.rigs.values()) rig.mixer.update(dt);
+
+    const playerSpeed = this.playerVelocity.length();
+    this.setRigAnimation(
+      this.wolf,
+      this.dashTime > 0 ? ['Gallop', 'Walk']
+        : this.isGrazing ? ['Eating', 'Idle_2_HeadLow', 'Idle']
+          : playerSpeed > .22 ? ['Walk', 'Gallop'] : ['Idle', 'Idle_2'],
+      this.dashTime > 0 ? 1.35 : THREE.MathUtils.clamp(playerSpeed / 2.8, .75, 1.25),
+    );
+
+    const dogMoving = this.dogVelocity.lengthSq() > .06;
+    this.setRigAnimation(
+      this.dog,
+      this.dogBiteWindup > 0 ? ['Attack', 'Idle_HitReact1']
+        : this.dogState === 'chase' ? ['Gallop', 'Walk']
+          : dogMoving ? ['Walk', 'Gallop'] : ['Idle', 'Idle_2'],
+      this.dogState === 'chase' ? 1.2 : 1,
+    );
+
+    this.setRigAnimation(
+      this.rival.mesh,
+      this.rival.attackWindup > 0 || this.rival.state === 'fight' ? ['Attack', 'Idle_HitReact1']
+        : this.rival.state === 'retreat' || this.rival.state === 'carry' ? ['Gallop', 'Walk']
+          : this.rival.velocity.lengthSq() > .06 ? ['Walk', 'Gallop'] : ['Idle', 'Idle_2'],
+      this.rival.state === 'retreat' ? 1.25 : 1,
+    );
+
+    for (const sheep of this.sheep) {
+      this.setRigAnimation(
+        sheep.mesh,
+        sheep.state === 'flee' ? ['Gallop', 'Walk']
+          : sheep.state === 'wander' ? ['Walk', 'Idle']
+            : sheep.state === 'carried' ? ['Idle_HitReact1', 'Idle']
+              : ['Eating', 'Idle_Headlow', 'Idle'],
+        sheep.state === 'flee' ? 1.25 : 1,
+      );
+    }
+
+    for (const animal of this.ambientAnimals) {
+      this.setRigAnimation(
+        animal.mesh,
+        animal.velocity.lengthSq() > .2 ? ['Gallop', 'Walk']
+          : animal.velocity.lengthSq() > .01 ? ['Walk', 'Idle'] : ['Eating', 'Idle_Headlow', 'Idle'],
+        animal.velocity.lengthSq() > .2 ? 1.1 : .85,
+      );
     }
   }
 
@@ -489,19 +717,49 @@ class PrototypeGame {
   private bindEvents(): void {
     window.addEventListener('keydown', (event) => {
       this.keys.add(event.code);
-      if (event.code === 'Space') event.preventDefault();
+      if (!event.repeat) this.pressed.add(event.code);
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) event.preventDefault();
       if (event.code === 'Escape' && !event.repeat) this.togglePause();
       if (event.code === 'KeyR' && this.finished && !event.repeat) this.start();
     });
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
     window.addEventListener('blur', () => {
       this.keys.clear();
+      this.pressed.clear();
       if (this.running) this.togglePause();
     });
     document.addEventListener('visibilitychange', () => {
       if (document.hidden && this.running) this.togglePause();
     });
     window.addEventListener('resize', () => this.resize());
+    this.renderer.domElement.addEventListener('pointerdown', (event) => {
+      this.cameraDragging = true;
+      this.cameraPointerX = event.clientX;
+      this.cameraPointerY = event.clientY;
+      this.renderer.domElement.setPointerCapture(event.pointerId);
+    });
+    this.renderer.domElement.addEventListener('pointermove', (event) => {
+      if (!this.cameraDragging) return;
+      const dx = event.clientX - this.cameraPointerX;
+      const dy = event.clientY - this.cameraPointerY;
+      this.cameraPointerX = event.clientX;
+      this.cameraPointerY = event.clientY;
+      this.cameraYaw -= dx * .006;
+      this.cameraPitch = THREE.MathUtils.clamp(this.cameraPitch + dy * .004, .58, 1.13);
+    });
+    this.renderer.domElement.addEventListener('pointerup', (event) => {
+      this.cameraDragging = false;
+      if (this.renderer.domElement.hasPointerCapture(event.pointerId)) {
+        this.renderer.domElement.releasePointerCapture(event.pointerId);
+      }
+    });
+    this.renderer.domElement.addEventListener('pointercancel', () => {
+      this.cameraDragging = false;
+    });
+    this.renderer.domElement.addEventListener('wheel', (event) => {
+      event.preventDefault();
+      this.cameraDistance = THREE.MathUtils.clamp(this.cameraDistance + event.deltaY * .012, 16, 34);
+    }, { passive: false });
     ui.start.addEventListener('click', () => {
       if (this.paused) this.resume();
       else this.start();
@@ -522,14 +780,31 @@ class PrototypeGame {
     });
   }
 
+  private consumeKey(...codes: string[]): boolean {
+    for (const code of codes) {
+      if (!this.pressed.has(code)) continue;
+      this.pressed.delete(code);
+      return true;
+    }
+    return false;
+  }
+
+  private showFeedback(message: string, duration = 1.5): void {
+    this.feedbackMessage = message;
+    this.feedbackTime = duration;
+  }
+
   private frame(): void {
     const dt = Math.min(this.clock.getDelta(), .05);
     if (this.running) this.update(dt);
+    this.pressed.clear();
+    if (!this.paused) this.updateRigAnimations(dt);
     this.renderer.render(this.scene, this.camera);
   }
 
   private update(dt: number): void {
     this.elapsed += dt;
+    this.feedbackTime = Math.max(0, this.feedbackTime - dt);
     this.biteCooldown = Math.max(0, this.biteCooldown - dt);
     this.actionCooldown = Math.max(0, this.actionCooldown - dt);
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
@@ -567,6 +842,7 @@ class PrototypeGame {
     this.updateRival(dt);
     this.tryBleat();
     this.updateSheep(dt);
+    this.updateAmbientAnimals(dt);
     this.updateDog(dt);
     this.updateShepherd(dt);
     this.tryAction();
@@ -579,18 +855,26 @@ class PrototypeGame {
       this.playerVelocity.multiplyScalar(Math.exp(-20 * dt));
       return false;
     }
-    const input = new THREE.Vector3(
+    const rawInput = new THREE.Vector3(
       Number(this.keys.has('KeyD') || this.keys.has('ArrowRight')) - Number(this.keys.has('KeyA') || this.keys.has('ArrowLeft')),
       0,
       Number(this.keys.has('KeyS') || this.keys.has('ArrowDown')) - Number(this.keys.has('KeyW') || this.keys.has('ArrowUp')),
     );
-    const hasInput = input.lengthSq() > 0;
-    if (hasInput) input.normalize();
+    const hasInput = rawInput.lengthSq() > 0;
+    if (hasInput) rawInput.normalize();
 
-    if ((this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) && this.dashCooldown <= 0 && hasInput) {
+    // Управление остаётся интуитивным при любом повороте камеры.
+    const cameraForward = new THREE.Vector3(-Math.sin(this.cameraYaw), 0, -Math.cos(this.cameraYaw));
+    const cameraRight = new THREE.Vector3(Math.cos(this.cameraYaw), 0, -Math.sin(this.cameraYaw));
+    const input = cameraRight.multiplyScalar(rawInput.x).addScaledVector(cameraForward, -rawInput.z);
+    if (input.lengthSq() > 0) input.normalize();
+
+    const dashPressed = this.consumeKey('ShiftLeft', 'ShiftRight');
+    if (dashPressed && this.dashCooldown <= 0 && hasInput) {
       if (this.playerCarrying) this.dropPlayerSheep();
       this.dashTime = .18;
       this.dashCooldown = DASH_COOLDOWN;
+      this.dashDirection.copy(input);
       this.dashHitRival = false;
       this.changeProgress = 0;
       if (this.canSee(this.dog.position, this.dogFacing, this.wolf.position, 8, 130)) {
@@ -599,12 +883,16 @@ class PrototypeGame {
       }
       this.playTone(180, .08, .035, 'triangle');
       this.emitNoise(this.wolf.position, 6, this.disguised ? 35 : 20);
+      this.showFeedback('Рывок: пёс услышал резкое движение', 1.1);
+    } else if (dashPressed && this.dashCooldown > 0) {
+      this.showFeedback(`Рывок восстановится через ${this.dashCooldown.toFixed(1)} с`, 1);
     }
 
     const baseSpeed = this.playerCarrying ? 2.7 : this.disguised ? 2.8 : 3.8;
     const speed = this.dashTime > 0 ? 8.5 : baseSpeed;
-    const targetVelocity = input.multiplyScalar(hasInput ? speed : 0);
-    const responsiveness = this.dashTime > 0 ? 24 : hasInput ? 12 : 18;
+    const movementDirection = this.dashTime > 0 ? this.dashDirection : input;
+    const targetVelocity = movementDirection.clone().multiplyScalar(hasInput || this.dashTime > 0 ? speed : 0);
+    const responsiveness = this.dashTime > 0 ? 30 : hasInput ? 9 : 14;
     this.playerVelocity.lerp(targetVelocity, 1 - Math.exp(-responsiveness * dt));
     const previous = this.wolf.position.clone();
     this.wolf.position.addScaledVector(this.playerVelocity, dt);
@@ -612,7 +900,12 @@ class PrototypeGame {
     this.resolveObstacles(this.wolf.position, .7, previous);
 
     if (this.playerVelocity.lengthSq() > .08) {
-      this.wolf.rotation.y = Math.atan2(-this.playerVelocity.z, this.playerVelocity.x);
+      const targetAngle = Math.atan2(-this.playerVelocity.z, this.playerVelocity.x);
+      const angleDelta = Math.atan2(
+        Math.sin(targetAngle - this.wolf.rotation.y),
+        Math.cos(targetAngle - this.wolf.rotation.y),
+      );
+      this.wolf.rotation.y += angleDelta * (1 - Math.exp(-(this.dashTime > 0 ? 18 : 12) * dt));
       this.wolf.position.y = Math.sin(this.elapsed * (this.dashTime > 0 ? 22 : 12)) * .045;
     } else {
       this.wolf.position.y = THREE.MathUtils.lerp(this.wolf.position.y, 0, 1 - Math.exp(-12 * dt));
@@ -675,13 +968,16 @@ class PrototypeGame {
       }
 
       sheep.turnIn -= dt;
+      sheep.panicMemory = Math.max(0, sheep.panicMemory - dt);
       const wolfDistance = sheep.mesh.position.distanceTo(this.wolf.position);
       const rivalDistance = this.rival.mesh.visible ? sheep.mesh.position.distanceTo(this.rival.mesh.position) : Infinity;
       const desired = new THREE.Vector3();
       const separation = new THREE.Vector3();
       const cohesion = new THREE.Vector3();
       const alignment = new THREE.Vector3();
+      const panicDirection = new THREE.Vector3();
       let neighbors = 0;
+      let panickedNeighbors = 0;
 
       for (const other of this.sheep) {
         if (other === sheep || !other.alive || other.carriedBy) continue;
@@ -690,13 +986,20 @@ class PrototypeGame {
           cohesion.add(other.mesh.position);
           alignment.add(other.velocity);
           neighbors += 1;
+          if (other.state === 'flee' && distance < 3.1) {
+            panicDirection.add(other.velocity);
+            panickedNeighbors += 1;
+          }
           if (distance < 1.35 && distance > .001) {
             separation.add(sheep.mesh.position.clone().sub(other.mesh.position).multiplyScalar(1 / distance));
           }
         }
       }
 
-      const threatened = (!this.disguised && wolfDistance < 6.2) || rivalDistance < 5.2;
+      const directlyThreatened = (!this.disguised && wolfDistance < 6.2) || rivalDistance < 5.2;
+      if (directlyThreatened) sheep.panicMemory = 1.8;
+      else if (panickedNeighbors > 0) sheep.panicMemory = Math.max(sheep.panicMemory, .85);
+      const threatened = directlyThreatened || sheep.panicMemory > 0;
       if (threatened) {
         sheep.state = 'flee';
         if (sheep.bell && this.bellNoiseCooldown <= 0) {
@@ -709,6 +1012,9 @@ class PrototypeGame {
         }
         if (rivalDistance < 5.2) {
           desired.add(sheep.mesh.position.clone().sub(this.rival.mesh.position).setY(0).multiplyScalar(1 / Math.max(.4, rivalDistance)));
+        }
+        if (!directlyThreatened && panickedNeighbors > 0 && panicDirection.lengthSq() > .001) {
+          desired.add(panicDirection.normalize().multiplyScalar(.7));
         }
         desired.normalize().multiplyScalar(2.65);
         sheep.turnIn = random(.5, 1.1);
@@ -749,6 +1055,40 @@ class PrototypeGame {
     }
   }
 
+  private updateAmbientAnimals(dt: number): void {
+    for (const animal of this.ambientAnimals) {
+      animal.turnIn -= dt;
+      const wolfDistance = animal.mesh.position.distanceTo(this.wolf.position);
+      let targetSpeed = .5;
+      if (!this.disguised && wolfDistance < 5.5) {
+        animal.wanderDirection.copy(animal.mesh.position).sub(this.wolf.position).setY(0).normalize();
+        animal.turnIn = 1.2;
+        targetSpeed = 1.65;
+      } else if (animal.turnIn <= 0) {
+        if (Math.random() < .28) {
+          animal.wanderDirection.set(0, 0, 0);
+          animal.turnIn = random(1.4, 3.2);
+        } else {
+          const angle = random(0, Math.PI * 2);
+          animal.wanderDirection.set(Math.cos(angle), 0, Math.sin(angle));
+          animal.turnIn = random(2.5, 6);
+        }
+      }
+
+      const desired = animal.wanderDirection.clone().multiplyScalar(targetSpeed);
+      desired.add(this.avoidObstacles(animal.mesh.position, 2.6).multiplyScalar(1.25));
+      if (desired.lengthSq() > targetSpeed * targetSpeed) desired.setLength(targetSpeed);
+      animal.velocity.lerp(desired, 1 - Math.exp(-3.5 * dt));
+      const previous = animal.mesh.position.clone();
+      animal.mesh.position.addScaledVector(animal.velocity, dt);
+      this.constrainToMap(animal.mesh.position, 1.25);
+      this.resolveObstacles(animal.mesh.position, .78, previous);
+      if (animal.velocity.lengthSq() > .02) {
+        animal.mesh.rotation.y = Math.atan2(-animal.velocity.z, animal.velocity.x);
+      }
+    }
+  }
+
   private updateDog(dt: number): void {
     const night = this.phase === 'Ночь' || this.phase === 'Сумерки';
     const viewRadius = (night ? 5.5 : 7) + this.guardLevel * .25;
@@ -776,9 +1116,16 @@ class PrototypeGame {
         const damageRate = (this.costumeIntegrity === 0 ? 60 : this.costumeIntegrity === 1 ? 20 : 0)
           * (1 + this.guardLevel * .1);
         const closeInspection = distance < 2.8 ? damageRate : 0;
+        const unnaturalMovement = this.dashTime > 0 ? 115
+          : this.playerVelocity.length() > 3.05 ? 18
+            : 0;
         const grazingRelief = this.isGrazing && !this.dogConfirmed ? 14 : 0;
-        this.dogSuspicion = THREE.MathUtils.clamp(this.dogSuspicion + (closeInspection - grazingRelief) * dt, 0, 100);
-        if (this.costumeIntegrity === 0 && this.dogSuspicion >= 100) this.dogConfirmed = true;
+        this.dogSuspicion = THREE.MathUtils.clamp(
+          this.dogSuspicion + (closeInspection + unnaturalMovement - grazingRelief) * dt,
+          0,
+          100,
+        );
+        if ((this.costumeIntegrity === 0 || unnaturalMovement > 0) && this.dogSuspicion >= 100) this.dogConfirmed = true;
       }
     } else if (this.dogState !== 'chase') {
       this.dogSuspicion = Math.max(0, this.dogSuspicion - dt * 10);
@@ -911,11 +1258,15 @@ class PrototypeGame {
 
   private updateContextActions(dt: number, moved: boolean): void {
     this.isGrazing = this.keys.has('KeyG') && this.disguised && !moved && !this.playerCarrying && this.playerHeld <= 0;
+    if (this.pressed.has('KeyG') && !this.isGrazing) {
+      this.showFeedback(!this.disguised ? 'Пастись можно только в овечьей шкуре' : 'Для выпаса остановитесь и не несите добычу');
+    }
     if (this.isGrazing && !this.dogConfirmed) {
       this.dogSuspicion = Math.max(0, this.dogSuspicion - dt * 8);
     }
 
     if (!this.keys.has('KeyE') || moved || this.playerHeld > 0) {
+      if (this.pressed.has('KeyE') && moved) this.showFeedback('Для долгого действия сначала остановитесь');
       this.eatProgress = 0;
       this.repairProgress = 0;
       return;
@@ -947,6 +1298,9 @@ class PrototypeGame {
       return;
     }
 
+    if (this.pressed.has('KeyE')) {
+      this.showFeedback(this.disguised ? 'E используется для ремонта повреждённой шкуры у сарая' : 'Сначала схватите овцу Пробелом');
+    }
     this.eatProgress = 0;
     this.repairProgress = 0;
   }
@@ -1119,8 +1473,19 @@ class PrototypeGame {
   }
 
   private tryBleat(): void {
-    if (!this.keys.has('KeyQ') || this.bleatCooldown > 0 || this.playerHeld > 0 || !this.disguised) return;
-    this.keys.delete('KeyQ');
+    if (!this.consumeKey('KeyQ')) return;
+    if (!this.disguised) {
+      this.showFeedback('Блеять можно только в овечьей шкуре');
+      return;
+    }
+    if (this.playerHeld > 0) {
+      this.showFeedback('Сначала вырвитесь из хватки пса');
+      return;
+    }
+    if (this.bleatCooldown > 0) {
+      this.showFeedback(`Приманка восстановится через ${this.bleatCooldown.toFixed(1)} с`);
+      return;
+    }
     this.bleatCooldown = 6;
     this.bleatTimes.push(this.elapsed);
     while (this.bleatTimes.length > 0 && this.elapsed - this.bleatTimes[0] > 15) this.bleatTimes.shift();
@@ -1140,19 +1505,28 @@ class PrototypeGame {
     const repeated = this.bleatTimes.length >= 3;
     if (repeated) this.emitNoise(this.wolf.position, 6, 38, true);
     this.playTone(target ? 510 : 390, .16, .035, 'triangle');
+    this.showFeedback(target ? 'Ближайшая спокойная овца заинтересовалась' : 'Рядом нет спокойной овцы', 1.4);
   }
 
   private tryAction(): void {
-    if (!this.keys.has('Space') || this.actionCooldown > 0 || this.disguised) return;
+    if (!this.consumeKey('Space')) return;
+    if (this.actionCooldown > 0) {
+      this.showFeedback('Действие ещё восстанавливается', .8);
+      return;
+    }
+    if (this.disguised) {
+      this.showFeedback('Чтобы хватать и атаковать, сначала снимите шкуру');
+      return;
+    }
     if (this.playerCarrying) {
       this.dropPlayerSheep();
       this.actionCooldown = .3;
-      this.keys.delete('Space');
+      this.showFeedback('Добыча отпущена', 1);
       return;
     }
     const playerFacing = new THREE.Vector3(Math.cos(this.wolf.rotation.y), 0, -Math.sin(this.wolf.rotation.y));
-    if (this.rival.mesh.visible && this.rival.mesh.position.distanceTo(this.wolf.position) < 1.85
-      && this.canSee(this.wolf.position, playerFacing, this.rival.mesh.position, 1.9, 200)) {
+    if (this.rival.mesh.visible && this.rival.mesh.position.distanceTo(this.wolf.position) < 2.25
+      && this.canSee(this.wolf.position, playerFacing, this.rival.mesh.position, 2.3, 240)) {
       this.rival.hp -= 1;
       this.rival.state = this.rival.hp <= 0 ? 'retreat' : 'fight';
       this.rival.attackWindup = 0;
@@ -1160,24 +1534,27 @@ class PrototypeGame {
       const push = this.rival.mesh.position.clone().sub(this.wolf.position).setY(0);
       if (push.lengthSq() > .001) this.rival.mesh.position.addScaledVector(push.normalize(), 1.2);
       this.actionCooldown = .55;
-      this.keys.delete('Space');
       this.playTone(165, .1, .055, 'square');
       this.emitNoise(this.wolf.position, 6, 35, true, true);
+      this.showFeedback(this.rival.hp <= 0 ? 'Соперник отступает' : `Удар по сопернику · ${this.rival.hp} HP`, 1.2);
       return;
     }
     if (this.victoryPending) return;
     let nearest: Sheep | undefined;
-    let nearestDistance = 1.65;
+    let nearestDistance = 2.05;
     for (const sheep of this.sheep) {
       if (!sheep.alive || sheep.carriedBy) continue;
       const distance = sheep.mesh.position.distanceTo(this.wolf.position);
       if (distance < nearestDistance
-        && this.canSee(this.wolf.position, playerFacing, sheep.mesh.position, 1.7, 200)) {
+        && this.canSee(this.wolf.position, playerFacing, sheep.mesh.position, 2.1, 240)) {
         nearest = sheep;
         nearestDistance = distance;
       }
     }
-    if (!nearest) return;
+    if (!nearest) {
+      this.showFeedback('Подойдите ближе и повернитесь к овце');
+      return;
+    }
     this.playerCarrying = nearest;
     nearest.carriedBy = 'player';
     nearest.state = 'carried';
@@ -1185,7 +1562,7 @@ class PrototypeGame {
     this.emitNoise(this.wolf.position, 4, 25, true, true);
     this.playTone(230, .11, .04, 'triangle');
     this.actionCooldown = .45;
-    this.keys.delete('Space');
+    this.showFeedback('Овца в зубах: удерживайте E, чтобы съесть', 1.5);
   }
 
   private completeEating(): void {
@@ -1316,6 +1693,11 @@ class PrototypeGame {
     const direction = target.clone().sub(this.rival.mesh.position).setY(0);
     if (direction.lengthSq() > .02) direction.normalize().multiplyScalar(speed);
     direction.add(this.avoidObstacles(this.rival.mesh.position, 2.2).multiplyScalar(speed));
+    const fromDog = this.rival.mesh.position.clone().sub(this.dog.position).setY(0);
+    const dogDistance = fromDog.length();
+    if (dogDistance < 4.8 && dogDistance > .001) {
+      direction.add(fromDog.normalize().multiplyScalar((4.8 - dogDistance) * .75));
+    }
     if (direction.lengthSq() > speed * speed) direction.setLength(speed);
     this.rival.velocity.lerp(direction, 1 - Math.exp(-8 * dt));
     const previous = this.rival.mesh.position.clone();
@@ -1477,13 +1859,25 @@ class PrototypeGame {
     if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.copy(color);
     this.sun.intensity = THREE.MathUtils.lerp(2.1, .35, nightFactor);
     this.sky.intensity = THREE.MathUtils.lerp(1.6, .45, nightFactor);
+    for (const light of this.lanterns) light.intensity = THREE.MathUtils.lerp(.35, 3.2, nightFactor);
   }
 
   private updateCamera(dt: number): void {
-    this.cameraTarget.lerp(this.wolf.position, 1 - Math.exp(-3 * dt));
-    this.camera.position.x = this.cameraTarget.x + 18;
-    this.camera.position.z = this.cameraTarget.z + 18;
-    this.camera.lookAt(this.cameraTarget);
+    const rotateInput = Number(this.keys.has('KeyX')) - Number(this.keys.has('KeyZ'));
+    this.cameraYaw += rotateInput * dt * 1.15;
+    const lookAhead = this.wolf.position.clone().addScaledVector(this.playerVelocity, .65);
+    this.cameraTarget.lerp(lookAhead, 1 - Math.exp(-4.5 * dt));
+    const dynamicDistance = this.cameraDistance + (this.dashTime > 0 ? 1.8 : 0);
+    const horizontal = Math.cos(this.cameraPitch) * dynamicDistance;
+    const desired = new THREE.Vector3(
+      this.cameraTarget.x + Math.sin(this.cameraYaw) * horizontal,
+      Math.sin(this.cameraPitch) * dynamicDistance,
+      this.cameraTarget.z + Math.cos(this.cameraYaw) * horizontal,
+    );
+    this.camera.position.lerp(desired, 1 - Math.exp(-5 * dt));
+    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, this.dashTime > 0 ? 47 : 42, 1 - Math.exp(-9 * dt));
+    this.camera.updateProjectionMatrix();
+    this.camera.lookAt(this.cameraTarget.x, .55, this.cameraTarget.z);
   }
 
   private updateUi(): void {
@@ -1524,8 +1918,10 @@ class PrototypeGame {
     };
     ui.rival.textContent = `Соперник: ${this.rival.attackWindup > 0 ? 'готовит бросок!' : rivalLabels[this.rival.state]}`;
     ui.dash.textContent = `Рывок: ${this.dashCooldown <= 0 ? 'готов' : `${this.dashCooldown.toFixed(1)} с`} · приманка: ${this.bleatCooldown <= 0 ? 'готова' : `${this.bleatCooldown.toFixed(1)} с`}`;
+    ui.models.textContent = this.modelStatus;
     const nearBarn = this.wolf.position.distanceTo(new THREE.Vector3(11, 0, -8)) < 4.5;
-    if (this.playerHeld > 0) ui.hint.textContent = `Пёс удерживает: ${this.playerHeld.toFixed(1)} с — Shift для рывка!`;
+    if (this.feedbackTime > 0) ui.hint.textContent = this.feedbackMessage;
+    else if (this.playerHeld > 0) ui.hint.textContent = `Пёс удерживает: ${this.playerHeld.toFixed(1)} с — Shift для рывка!`;
     else if (this.eatProgress > 0) ui.hint.textContent = `Поедание: ${Math.max(0, 1.6 - this.eatProgress).toFixed(1)} с`;
     else if (this.repairProgress > 0) ui.hint.textContent = `Ремонт маскировки: ${Math.max(0, 2 - this.repairProgress).toFixed(1)} с`;
     else if (this.changeProgress > 0) ui.hint.textContent = `Переодевание: ${Math.ceil(CHANGE_TIME - this.changeProgress)} с`;
@@ -1613,16 +2009,12 @@ class PrototypeGame {
       sheep.turnIn = random(0, 2);
       sheep.state = 'graze';
       sheep.carriedBy = null;
+      sheep.panicMemory = 0;
     }
   }
 
   private resize(): void {
-    const aspect = window.innerWidth / window.innerHeight;
-    const view = 18;
-    this.camera.left = -view * aspect;
-    this.camera.right = view * aspect;
-    this.camera.top = view;
-    this.camera.bottom = -view;
+    this.camera.aspect = window.innerWidth / window.innerHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   }

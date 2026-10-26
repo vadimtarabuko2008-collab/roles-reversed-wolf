@@ -74,6 +74,7 @@ canvas { display: block; }
 
 .status-panel > div + div { margin-top: 6px; }
 #hint { color: #d7b36b; }
+#models-status { color: #aebfa6; font-size: 11px; }
 
 .progress {
   height: 7px;
