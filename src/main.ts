@@ -182,6 +182,13 @@ class PrototypeGame {
   private soundEnabled = true;
 
   constructor(container: HTMLElement) {
+    try {
+      this.soundEnabled = localStorage.getItem('roles-reversed-wolf.sound') !== 'off';
+    } catch {
+      this.soundEnabled = true;
+    }
+    ui.sound.textContent = `Звук: ${this.soundEnabled ? 'вкл' : 'выкл'}`;
+    ui.sound.setAttribute('aria-pressed', String(this.soundEnabled));
     const aspect = window.innerWidth / window.innerHeight;
     const view = 18;
     this.camera = new THREE.OrthographicCamera(-view * aspect, view * aspect, view, -view, 0.1, 100);
@@ -213,6 +220,7 @@ class PrototypeGame {
   }
 
   private reset(): void {
+    this.keys.clear();
     this.finished = false;
     this.running = false;
     this.elapsed = 0;
@@ -483,7 +491,7 @@ class PrototypeGame {
       this.keys.add(event.code);
       if (event.code === 'Space') event.preventDefault();
       if (event.code === 'Escape' && !event.repeat) this.togglePause();
-      if (event.code === 'KeyR' && this.finished) this.showIntro();
+      if (event.code === 'KeyR' && this.finished && !event.repeat) this.start();
     });
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
     window.addEventListener('blur', () => {
@@ -502,6 +510,11 @@ class PrototypeGame {
       this.soundEnabled = !this.soundEnabled;
       ui.sound.textContent = `Звук: ${this.soundEnabled ? 'вкл' : 'выкл'}`;
       ui.sound.setAttribute('aria-pressed', String(this.soundEnabled));
+      try {
+        localStorage.setItem('roles-reversed-wolf.sound', this.soundEnabled ? 'on' : 'off');
+      } catch {
+        // Недоступное хранилище не должно ломать забег.
+      }
       if (this.soundEnabled) {
         this.ensureAudio();
         this.playTone(520, .08, .035);
@@ -1559,15 +1572,6 @@ class PrototypeGame {
     oscillator.stop(this.audioContext.currentTime + duration);
   }
 
-  private showIntro(): void {
-    this.running = false;
-    this.paused = false;
-    ui.overlayTitle.textContent = 'Волк в овечьей шкуре';
-    ui.overlayText.textContent = 'Днём смешивайтесь со стадом и выбирайте момент для охоты. Ночью сторожевой пёс становится активнее — теперь охотятся уже на вас.';
-    ui.start.textContent = 'Начать забег';
-    ui.overlay.classList.remove('hidden');
-  }
-
   private togglePause(): void {
     if (this.finished) return;
     if (this.paused) {
@@ -1596,7 +1600,15 @@ class PrototypeGame {
     for (const sheep of this.sheep) {
       sheep.alive = true;
       sheep.mesh.visible = true;
-      sheep.mesh.position.set(random(-12, 9), 0, random(-8, 8));
+      const spawn = new THREE.Vector3();
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        spawn.set(random(-12, 9), 0, random(-8, 8));
+        const clearOfObstacle = this.obstacles.every(
+          (obstacle) => spawn.distanceTo(obstacle.position) > obstacle.radius + .9,
+        );
+        if (clearOfObstacle) break;
+      }
+      sheep.mesh.position.copy(spawn);
       sheep.velocity.set(0, 0, 0);
       sheep.turnIn = random(0, 2);
       sheep.state = 'graze';
