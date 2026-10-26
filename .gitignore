@@ -1,0 +1,24 @@
+# Dependencies and builds
+node_modules/
+dist/
+coverage/
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.vscode/*.log
+
+# Temporary exports and Blender backups
+*.blend1
+*.blend2
+*.tmp
+*.bak
+
+# Logs
+*.log
+npm-debug.log*
+
