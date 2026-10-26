@@ -14,8 +14,9 @@ interface Sheep {
   alive: boolean;
   turnIn: number;
   state: SheepState;
-  carriedBy: 'rival' | null;
+  carriedBy: 'player' | 'rival' | null;
   bobOffset: number;
+  bell: boolean;
 }
 
 interface ScentMark {
@@ -39,7 +40,6 @@ interface Rival {
   exit: THREE.Vector3;
   exitTimer: number;
   attackCooldown: number;
-  spawnedThisNight: boolean;
 }
 
 const MAP_W = 32;
@@ -52,11 +52,14 @@ const DASH_COOLDOWN = 5;
 
 const ui = {
   phase: required('phase'),
+  day: required('day'),
   time: required('time'),
   sheep: required('sheep'),
   lost: required('lost'),
   health: required('health'),
   form: required('form'),
+  costume: required('costume'),
+  carrying: required('carrying'),
   danger: required('danger'),
   rival: required('rival-status'),
   dash: required('dash-status'),
@@ -100,7 +103,6 @@ class PrototypeGame {
     exit: new THREE.Vector3(-15, 0, 0),
     exitTimer: 0,
     attackCooldown: 0,
-    spawnedThisNight: false,
   };
   private readonly shepherd = this.createShepherd();
   private readonly sun = new THREE.DirectionalLight(0xffedc7, 2.1);
@@ -136,8 +138,24 @@ class PrototypeGame {
   private actionCooldown = 0;
   private phase: Phase = 'День';
   private previousPhase: Phase = 'День';
+  private dayNumber = 1;
+  private cycleIndex = 0;
+  private guardLevel = 0;
   private lostSheep = 0;
   private perfectPossible = true;
+  private playerCarrying?: Sheep;
+  private eatProgress = 0;
+  private repairProgress = 0;
+  private costumeIntegrity = 2;
+  private repairKits = 2;
+  private bleatCooldown = 0;
+  private lureTime = 0;
+  private luredSheep?: Sheep;
+  private readonly bleatTimes: number[] = [];
+  private bellNoiseCooldown = 0;
+  private isGrazing = false;
+  private playerHeld = 0;
+  private playerHeldElapsed = 0;
   private dashCooldown = 0;
   private dashTime = 0;
   private scentTimer = 0;
@@ -146,11 +164,15 @@ class PrototypeGame {
   private dogSuspicion = 0;
   private dogSearchTime = 0;
   private dogBiteWindup = 0;
+  private dogConfirmed = false;
   private dogPatrolIndex = 0;
   private shepherdState: ShepherdState = 'resting';
   private shepherdPatrolIndex = 0;
   private shepherdAim = 0;
   private shepherdReload = 0;
+  private rivalEntriesThisNight = 0;
+  private nextRivalSpawn = 66;
+  private paused = false;
   private audioContext?: AudioContext;
   private soundEnabled = true;
 
@@ -180,6 +202,7 @@ class PrototypeGame {
     window.setTimeout(() => this.playTone(523, .13, .04), 90);
     this.reset();
     this.running = true;
+    this.paused = false;
     ui.overlay.classList.add('hidden');
     this.clock.start();
   }
@@ -195,8 +218,24 @@ class PrototypeGame {
     this.changeProgress = 0;
     this.biteCooldown = 0;
     this.actionCooldown = 0;
+    this.dayNumber = 1;
+    this.cycleIndex = 0;
+    this.guardLevel = 0;
     this.lostSheep = 0;
     this.perfectPossible = true;
+    this.playerCarrying = undefined;
+    this.eatProgress = 0;
+    this.repairProgress = 0;
+    this.costumeIntegrity = 2;
+    this.repairKits = 2;
+    this.bleatCooldown = 0;
+    this.lureTime = 0;
+    this.luredSheep = undefined;
+    this.bleatTimes.length = 0;
+    this.bellNoiseCooldown = 0;
+    this.isGrazing = false;
+    this.playerHeld = 0;
+    this.playerHeldElapsed = 0;
     this.dashCooldown = 0;
     this.dashTime = 0;
     this.scentTimer = 0;
@@ -211,6 +250,7 @@ class PrototypeGame {
     this.dogSuspicion = 0;
     this.dogSearchTime = 0;
     this.dogBiteWindup = 0;
+    this.dogConfirmed = false;
     this.dogPatrolIndex = 0;
     this.rival.state = 'hidden';
     this.rival.mesh.visible = false;
@@ -219,12 +259,14 @@ class PrototypeGame {
     this.rival.carrying = undefined;
     this.rival.velocity.set(0, 0, 0);
     this.rival.exitTimer = 0;
-    this.rival.spawnedThisNight = false;
     this.shepherdState = 'resting';
     this.shepherd.visible = false;
     this.shepherd.position.set(11, 0, -8);
     this.shepherdAim = 0;
     this.shepherdReload = 0;
+    this.rivalEntriesThisNight = 0;
+    this.nextRivalSpawn = 66;
+    this.paused = false;
     this.previousPhase = 'День';
     this.phase = 'День';
     this.setDisguiseVisual();
@@ -253,13 +295,14 @@ class PrototypeGame {
     for (let i = 0; i < 8; i += 1) {
       const sheep: Sheep = {
         id: i,
-        mesh: this.createSheep(),
+        mesh: this.createSheep(i === 0),
         velocity: new THREE.Vector3(),
         alive: true,
         turnIn: 0,
         state: 'graze',
         carriedBy: null,
         bobOffset: random(0, Math.PI * 2),
+        bell: i === 0,
       };
       this.sheep.push(sheep);
       this.scene.add(sheep.mesh);
@@ -329,7 +372,7 @@ class PrototypeGame {
     return group;
   }
 
-  private createSheep(): THREE.Group {
+  private createSheep(hasBell = false): THREE.Group {
     const group = new THREE.Group();
     const wool = new THREE.MeshStandardMaterial({ color: 0xf3ead4, roughness: 1 });
     const face = new THREE.MeshStandardMaterial({ color: 0x38342f, roughness: 1 });
@@ -341,6 +384,15 @@ class PrototypeGame {
     head.position.set(.78, .72, 0);
     head.castShadow = true;
     group.add(body, head);
+    if (hasBell) {
+      const bell = new THREE.Mesh(
+        new THREE.SphereGeometry(.12, 8, 6),
+        new THREE.MeshStandardMaterial({ color: 0xd6a62d, metalness: .35, roughness: .45 }),
+      );
+      bell.position.set(.57, .48, 0);
+      bell.name = 'bell';
+      group.add(bell);
+    }
     return group;
   }
 
@@ -407,12 +459,22 @@ class PrototypeGame {
     window.addEventListener('keydown', (event) => {
       this.keys.add(event.code);
       if (event.code === 'Space') event.preventDefault();
+      if (event.code === 'Escape' && !event.repeat) this.togglePause();
       if (event.code === 'KeyR' && this.finished) this.showIntro();
     });
     window.addEventListener('keyup', (event) => this.keys.delete(event.code));
-    window.addEventListener('blur', () => this.keys.clear());
+    window.addEventListener('blur', () => {
+      this.keys.clear();
+      if (this.running) this.togglePause();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden && this.running) this.togglePause();
+    });
     window.addEventListener('resize', () => this.resize());
-    ui.start.addEventListener('click', () => this.start());
+    ui.start.addEventListener('click', () => {
+      if (this.paused) this.resume();
+      else this.start();
+    });
     ui.sound.addEventListener('click', () => {
       this.soundEnabled = !this.soundEnabled;
       ui.sound.textContent = `Звук: ${this.soundEnabled ? 'вкл' : 'выкл'}`;
@@ -435,14 +497,36 @@ class PrototypeGame {
     this.biteCooldown = Math.max(0, this.biteCooldown - dt);
     this.actionCooldown = Math.max(0, this.actionCooldown - dt);
     this.dashCooldown = Math.max(0, this.dashCooldown - dt);
+    this.bleatCooldown = Math.max(0, this.bleatCooldown - dt);
+    this.bellNoiseCooldown = Math.max(0, this.bellNoiseCooldown - dt);
+    this.lureTime = Math.max(0, this.lureTime - dt);
+    if (this.lureTime <= 0) this.luredSheep = undefined;
     this.dashTime = Math.max(0, this.dashTime - dt);
     this.rival.attackCooldown = Math.max(0, this.rival.attackCooldown - dt);
     this.shepherdReload = Math.max(0, this.shepherdReload - dt);
+    if (this.playerHeld > 0) {
+      this.playerHeld = Math.max(0, this.playerHeld - dt);
+      this.playerHeldElapsed += dt;
+      const wantsEscape = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+      if (this.playerHeldElapsed >= .15 && wantsEscape && this.dashCooldown <= 0) {
+        this.playerHeld = 0;
+        this.playerHeldElapsed = 0;
+        this.dashCooldown = DASH_COOLDOWN;
+        this.dashTime = .18;
+        this.playTone(220, .08, .04, 'triangle');
+      }
+    }
     this.updatePhase();
+    if (this.elapsed >= CYCLE_TIME * 3 && this.score < GOAL) {
+      this.finish(false, 'Стадо увели', 'Три дня закончились. Пастух усилил охрану и увёл оставшихся овец.');
+      return;
+    }
     const moved = this.updatePlayer(dt);
     this.updateDisguise(dt, moved);
+    this.updateContextActions(dt, moved);
     this.updateScent(dt, moved);
     this.updateRival(dt);
+    this.tryBleat();
     this.updateSheep(dt);
     this.updateDog(dt);
     this.updateShepherd(dt);
@@ -452,6 +536,10 @@ class PrototypeGame {
   }
 
   private updatePlayer(dt: number): boolean {
+    if (this.playerHeld > 0) {
+      this.playerVelocity.multiplyScalar(Math.exp(-20 * dt));
+      return false;
+    }
     const input = new THREE.Vector3(
       Number(this.keys.has('KeyD') || this.keys.has('ArrowRight')) - Number(this.keys.has('KeyA') || this.keys.has('ArrowLeft')),
       0,
@@ -461,6 +549,7 @@ class PrototypeGame {
     if (hasInput) input.normalize();
 
     if ((this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) && this.dashCooldown <= 0 && hasInput) {
+      if (this.playerCarrying) this.dropPlayerSheep();
       this.dashTime = .18;
       this.dashCooldown = DASH_COOLDOWN;
       this.changeProgress = 0;
@@ -469,9 +558,10 @@ class PrototypeGame {
         this.dogLastSeen.copy(this.wolf.position);
       }
       this.playTone(180, .08, .035, 'triangle');
+      this.emitNoise(this.wolf.position, 6, this.disguised ? 35 : 20);
     }
 
-    const baseSpeed = this.disguised ? 2.8 : 3.8;
+    const baseSpeed = this.playerCarrying ? 2.7 : this.disguised ? 2.8 : 3.8;
     const speed = this.dashTime > 0 ? 8.5 : baseSpeed;
     const targetVelocity = input.multiplyScalar(hasInput ? speed : 0);
     const responsiveness = this.dashTime > 0 ? 24 : hasInput ? 12 : 18;
@@ -495,6 +585,11 @@ class PrototypeGame {
       this.changeProgress = 0;
       return;
     }
+    if (this.playerCarrying) {
+      this.changeProgress = 0;
+      ui.hint.textContent = 'Сначала бросьте или съешьте овцу';
+      return;
+    }
     if (moved) {
       this.changeProgress = 0;
       ui.hint.textContent = 'Чтобы переодеться, стойте неподвижно';
@@ -512,12 +607,26 @@ class PrototypeGame {
 
   private setDisguiseVisual(): void {
     const coat = this.wolf.getObjectByName('coat');
-    if (coat) coat.visible = this.disguised;
+    if (coat) {
+      coat.visible = this.disguised;
+      if (coat instanceof THREE.Mesh && coat.material instanceof THREE.MeshStandardMaterial) {
+        const colors = [0x7e776a, 0xc5beaa, 0xe8e1ca];
+        coat.material.color.setHex(colors[this.costumeIntegrity]);
+      }
+    }
   }
 
   private updateSheep(dt: number): void {
     for (const sheep of this.sheep) {
       if (!sheep.alive) continue;
+      if (sheep.carriedBy === 'player') {
+        sheep.state = 'carried';
+        const forward = new THREE.Vector3(Math.cos(this.wolf.rotation.y), 0, -Math.sin(this.wolf.rotation.y));
+        sheep.mesh.position.copy(this.wolf.position).addScaledVector(forward, .92);
+        sheep.mesh.position.y = .42;
+        sheep.mesh.rotation.y = this.wolf.rotation.y;
+        continue;
+      }
       if (sheep.carriedBy === 'rival') {
         sheep.state = 'carried';
         sheep.mesh.position.copy(this.rival.mesh.position).add(new THREE.Vector3(.1, .55, -.65));
@@ -550,6 +659,11 @@ class PrototypeGame {
       const threatened = (!this.disguised && wolfDistance < 6.2) || rivalDistance < 5.2;
       if (threatened) {
         sheep.state = 'flee';
+        if (sheep.bell && this.bellNoiseCooldown <= 0) {
+          this.bellNoiseCooldown = 3;
+          this.emitNoise(sheep.mesh.position, 7, 24, true);
+          this.playTone(880, .08, .025, 'triangle');
+        }
         if (!this.disguised && wolfDistance < 6.2) {
           desired.add(sheep.mesh.position.clone().sub(this.wolf.position).setY(0).multiplyScalar(1 / Math.max(.4, wolfDistance)));
         }
@@ -558,6 +672,12 @@ class PrototypeGame {
         }
         desired.normalize().multiplyScalar(2.65);
         sheep.turnIn = random(.5, 1.1);
+      } else if (sheep === this.luredSheep && this.lureTime > 0 && this.disguised) {
+        sheep.state = wolfDistance > 1.05 ? 'wander' : 'graze';
+        if (wolfDistance > 1.05) {
+          desired.copy(this.wolf.position).sub(sheep.mesh.position).setY(0).normalize().multiplyScalar(1.05);
+        }
+        sheep.turnIn = .4;
       } else {
         if (sheep.turnIn <= 0) {
           sheep.state = Math.random() < .42 ? 'graze' : 'wander';
@@ -591,7 +711,7 @@ class PrototypeGame {
 
   private updateDog(dt: number): void {
     const night = this.phase === 'Ночь' || this.phase === 'Сумерки';
-    const viewRadius = night ? 5.5 : 7;
+    const viewRadius = (night ? 5.5 : 7) + this.guardLevel * .25;
     const seesPlayer = this.canSee(this.dog.position, this.dogFacing, this.wolf.position, viewRadius, 110);
     const distance = this.dog.position.distanceTo(this.wolf.position);
     const rivalThreat = this.rival.mesh.visible && this.rival.carrying
@@ -601,9 +721,14 @@ class PrototypeGame {
       if (!this.disguised) {
         this.dogSuspicion = Math.min(100, this.dogSuspicion + dt * 260);
         this.dogLastSeen.copy(this.wolf.position);
+        this.dogConfirmed = true;
       } else {
-        const closeInspection = distance < 2.2 ? 20 : 0;
-        this.dogSuspicion = Math.min(100, this.dogSuspicion + closeInspection * dt);
+        const damageRate = (this.costumeIntegrity === 0 ? 60 : this.costumeIntegrity === 1 ? 20 : 0)
+          * (1 + this.guardLevel * .1);
+        const closeInspection = distance < 2.8 ? damageRate : 0;
+        const grazingRelief = this.isGrazing && !this.dogConfirmed ? 14 : 0;
+        this.dogSuspicion = THREE.MathUtils.clamp(this.dogSuspicion + (closeInspection - grazingRelief) * dt, 0, 100);
+        if (this.costumeIntegrity === 0 && this.dogSuspicion >= 100) this.dogConfirmed = true;
       }
     } else if (this.dogState !== 'chase') {
       this.dogSuspicion = Math.max(0, this.dogSuspicion - dt * 10);
@@ -620,13 +745,13 @@ class PrototypeGame {
       return;
     }
 
-    if (this.dogSuspicion >= 100 && seesPlayer && !this.disguised) this.dogState = 'chase';
+    if (this.dogSuspicion >= 100 && seesPlayer && (!this.disguised || this.dogConfirmed)) this.dogState = 'chase';
     else if (this.dogSuspicion >= 55 && this.dogState === 'patrol') this.dogState = 'alert';
 
     switch (this.dogState) {
       case 'patrol': {
         const target = this.dogPatrolPoints[this.dogPatrolIndex];
-        this.moveDogToward(target, night ? 2.15 : 1.6, dt);
+        this.moveDogToward(target, (night ? 2.15 : 1.6) + this.guardLevel * .08, dt);
         if (this.dog.position.distanceTo(target) < .7) {
           this.dogPatrolIndex = (this.dogPatrolIndex + 1) % this.dogPatrolPoints.length;
         }
@@ -644,10 +769,10 @@ class PrototypeGame {
         }
         break;
       case 'chase':
-        if (seesPlayer && !this.disguised) {
+        if (seesPlayer && (!this.disguised || this.dogConfirmed)) {
           this.dogLastSeen.copy(this.wolf.position);
           const intercept = this.wolf.position.clone().addScaledVector(this.playerVelocity, Math.min(.55, distance / 12));
-          this.moveDogToward(intercept, 4.2, dt);
+          this.moveDogToward(intercept, 4.2 + this.guardLevel * .12, dt);
         } else {
           this.dogState = 'search-visual';
           this.dogSearchTime = 0;
@@ -657,7 +782,7 @@ class PrototypeGame {
       case 'search-visual':
         this.dogSearchTime += dt;
         this.moveDogToward(this.dogLastSeen, 2.5, dt);
-        if (seesPlayer && !this.disguised) this.dogState = 'chase';
+        if (seesPlayer && (!this.disguised || this.dogConfirmed)) this.dogState = 'chase';
         else if (this.dog.position.distanceTo(this.dogLastSeen) < .75 || this.dogSearchTime > 4) {
           this.dogState = 'search-scent';
           this.dogSearchTime = 0;
@@ -673,9 +798,10 @@ class PrototypeGame {
           this.dogVelocity.multiplyScalar(Math.exp(-5 * dt));
           this.dog.rotation.y += dt * 1.4;
         }
-        if (seesPlayer && !this.disguised) this.dogState = 'chase';
+        if (seesPlayer && (!this.disguised || this.dogConfirmed)) this.dogState = 'chase';
         else if (this.dogSearchTime > 6 || (this.scents.length === 0 && this.dogSearchTime > 2)) {
           this.dogState = 'return';
+          this.dogConfirmed = false;
           this.dogSuspicion = Math.min(this.dogSuspicion, 15);
         }
         break;
@@ -688,14 +814,25 @@ class PrototypeGame {
       }
     }
 
-    const canBite = this.dogState === 'chase' && distance < 1.45 && this.biteCooldown <= 0;
+    const canBite = this.dogState === 'chase' && distance < 1.45 && this.biteCooldown <= 0
+      && this.playerHeld <= 0 && this.dashTime <= 0;
     this.dogBiteWindup = canBite ? this.dogBiteWindup + dt : 0;
     if (this.dogBiteWindup >= .3) {
       this.dogBiteWindup = 0;
       const toWolf = this.wolf.position.clone().sub(this.dog.position).setY(0);
       this.maxHealth = Math.max(0, this.maxHealth - 1);
       this.health = Math.min(this.health - 1, this.maxHealth);
+      if (this.disguised) {
+        this.costumeIntegrity = Math.max(0, this.costumeIntegrity - 1);
+        this.setDisguiseVisual();
+      }
+      if (this.playerCarrying) this.dropPlayerSheep();
       this.biteCooldown = 1.4;
+      const shepherdCanHold = this.shepherd.visible && this.shepherd.position.distanceTo(this.dog.position) <= 6;
+      if (shepherdCanHold) {
+        this.playerHeld = 1.2;
+        this.playerHeldElapsed = 0;
+      }
       this.playTone(105, .2, .075, 'sawtooth');
       if (toWolf.lengthSq() > .001) this.wolf.position.addScaledVector(toWolf.normalize(), 1.35);
       if (this.health <= 0) this.finish(false, 'Пёс оставил последнюю рану', 'Пёс видит только то, что действительно наблюдал, но на прямой он быстрее. Разрывайте видимость и уводите его на старый запах.');
@@ -715,17 +852,63 @@ class PrototypeGame {
       this.scents.push({
         position: this.wolf.position.clone().setY(0),
         age: 0,
-        strength: !this.disguised ? (moved ? 1 : .75) : .3,
+        strength: this.playerCarrying ? 1.35 : !this.disguised ? (moved ? 1 : .75) : .3,
       });
       this.scentTimer = moved ? .35 : 1;
       if (this.scents.length > 192) this.scents.splice(0, this.scents.length - 192);
     }
   }
 
+  private updateContextActions(dt: number, moved: boolean): void {
+    this.isGrazing = this.keys.has('KeyG') && this.disguised && !moved && !this.playerCarrying && this.playerHeld <= 0;
+    if (this.isGrazing && !this.dogConfirmed) {
+      this.dogSuspicion = Math.max(0, this.dogSuspicion - dt * 8);
+    }
+
+    if (!this.keys.has('KeyE') || moved || this.playerHeld > 0) {
+      this.eatProgress = 0;
+      this.repairProgress = 0;
+      return;
+    }
+
+    if (this.playerCarrying && !this.disguised) {
+      this.eatProgress += dt;
+      this.repairProgress = 0;
+      if (this.eatProgress >= 1.6) {
+        this.eatProgress = 0;
+        this.keys.delete('KeyE');
+        this.completeEating();
+      }
+      return;
+    }
+
+    const nearBarn = this.wolf.position.distanceTo(new THREE.Vector3(11, 0, -8)) < 4.5;
+    if (nearBarn && this.disguised && this.costumeIntegrity < 2 && this.repairKits > 0) {
+      this.repairProgress += dt;
+      this.eatProgress = 0;
+      if (this.repairProgress >= 2) {
+        this.repairProgress = 0;
+        this.repairKits -= 1;
+        this.costumeIntegrity += 1;
+        this.keys.delete('KeyE');
+        this.setDisguiseVisual();
+        this.playTone(560, .15, .035, 'triangle');
+      }
+      return;
+    }
+
+    this.eatProgress = 0;
+    this.repairProgress = 0;
+  }
+
   private updateRival(dt: number): void {
     const cycle = this.elapsed % CYCLE_TIME;
     const isNight = this.phase === 'Ночь';
-    if (isNight && cycle > 66 && cycle < 96 && !this.rival.spawnedThisNight) this.spawnRival();
+    const entryBudget = this.dayNumber >= 3 ? 2 : 1;
+    if (isNight && cycle >= this.nextRivalSpawn && cycle < 101
+      && this.rival.state === 'hidden' && this.rivalEntriesThisNight < entryBudget) {
+      this.spawnRival();
+    }
     if ((this.phase === 'Рассвет' || this.phase === 'День') && this.rival.state !== 'hidden') {
       this.dropRivalSheep();
       this.rival.state = 'retreat';
@@ -733,8 +916,14 @@ class PrototypeGame {
     if (this.rival.state === 'hidden') return;
 
     const distanceToPlayer = this.rival.mesh.position.distanceTo(this.wolf.position);
-    if (!this.disguised && distanceToPlayer < 1.35 && this.rival.attackCooldown <= 0 && this.rival.state !== 'retreat') {
+    if (distanceToPlayer < 1.35 && this.rival.attackCooldown <= 0
+      && this.rival.state !== 'retreat' && this.dashTime <= 0) {
       this.health -= 1;
+      if (this.disguised) {
+        this.costumeIntegrity = Math.max(0, this.costumeIntegrity - 1);
+        this.setDisguiseVisual();
+      }
+      if (this.playerCarrying) this.dropPlayerSheep();
       this.rival.attackCooldown = 1.25;
       this.playTone(150, .12, .05, 'square');
       const knockback = this.wolf.position.clone().sub(this.rival.mesh.position).setY(0);
@@ -765,6 +954,7 @@ class PrototypeGame {
         this.rival.exit = this.nearestExit(this.rival.mesh.position);
         this.rival.state = 'carry';
         this.playTone(210, .18, .045, 'triangle');
+        this.emitNoise(this.rival.mesh.position, 4, 18, true, true);
       }
     } else if (this.rival.state === 'carry' || this.rival.state === 'escape-warning') {
       this.moveRivalToward(this.rival.exit, 2.65, dt);
@@ -791,7 +981,8 @@ class PrototypeGame {
 
   private updateShepherd(dt: number): void {
     const cycle = this.elapsed % CYCLE_TIME;
-    const shouldBeActive = this.phase === 'Ночь' || (this.phase === 'День' && cycle >= 35 && cycle <= 48);
+    const shouldBeActive = this.phase === 'Ночь'
+      || (this.phase === 'День' && cycle >= 35 - this.guardLevel * 2 && cycle <= 48 + this.guardLevel);
     if (!shouldBeActive) {
       this.shepherdState = 'resting';
       this.shepherd.visible = false;
@@ -805,18 +996,22 @@ class PrototypeGame {
     }
 
     const facing = new THREE.Vector3(Math.cos(this.shepherd.rotation.y), 0, -Math.sin(this.shepherd.rotation.y));
-    const seesPlayer = !this.disguised && this.canSee(this.shepherd.position, facing, this.wolf.position, 8, 100);
+    const seesPlayer = (!this.disguised || (this.playerHeld > 0 && this.dogConfirmed))
+      && this.canSee(this.shepherd.position, facing, this.wolf.position, 8, 100);
     if (seesPlayer && this.shepherdReload <= 0) {
       this.shepherdState = 'aim';
       this.shepherdAim += dt;
       const direction = this.wolf.position.clone().sub(this.shepherd.position).setY(0).normalize();
       this.shepherd.rotation.y = Math.atan2(-direction.z, direction.x);
-      if (this.shepherdAim >= .9) {
+      const aimDuration = this.playerHeld > 0 ? .45 : .9;
+      if (this.shepherdAim >= aimDuration) {
         this.shepherdAim = 0;
-        this.shepherdReload = 2.5;
+        this.shepherdReload = Math.max(1.9, 2.5 - this.guardLevel * .15);
         this.shepherdState = 'reload';
         this.playTone(70, .28, .09, 'square');
-        if (this.canSee(this.shepherd.position, direction, this.wolf.position, 8.4, 16)) {
+        if (this.dashTime > 0) {
+          this.playTone(310, .09, .035, 'triangle');
+        } else if (this.canSee(this.shepherd.position, direction, this.wolf.position, 8.4, 16)) {
           this.finish(false, 'Пастух попал в цель', 'Прицеливание заметно заранее. Разрывайте линию видимости за крупным укрытием или уходите рывком в сторону.');
         }
       }
@@ -825,7 +1020,7 @@ class PrototypeGame {
 
     this.shepherdAim = Math.max(0, this.shepherdAim - dt * 2.5);
     if (this.shepherdReload > 0) this.shepherdState = 'reload';
-    else if (this.dogState === 'chase') {
+    else if (this.dogState === 'chase' || this.dogState === 'alert') {
       this.shepherdState = 'investigate';
       this.moveShepherdToward(this.dogLastSeen, 1.8, dt);
     } else {
@@ -838,8 +1033,38 @@ class PrototypeGame {
     }
   }
 
+  private tryBleat(): void {
+    if (!this.keys.has('KeyQ') || this.bleatCooldown > 0 || this.playerHeld > 0 || !this.disguised) return;
+    this.keys.delete('KeyQ');
+    this.bleatCooldown = 6;
+    this.bleatTimes.push(this.elapsed);
+    while (this.bleatTimes.length > 0 && this.elapsed - this.bleatTimes[0] > 15) this.bleatTimes.shift();
+
+    let target: Sheep | undefined;
+    let targetDistance = 4.5;
+    for (const sheep of this.sheep) {
+      if (!sheep.alive || sheep.carriedBy || sheep.state === 'flee') continue;
+      const distance = sheep.mesh.position.distanceTo(this.wolf.position);
+      if (distance < targetDistance) {
+        target = sheep;
+        targetDistance = distance;
+      }
+    }
+    this.luredSheep = target;
+    this.lureTime = target ? 2.5 : 0;
+    const repeated = this.bleatTimes.length >= 3;
+    if (repeated) this.emitNoise(this.wolf.position, 6, 38, true);
+    this.playTone(target ? 510 : 390, .16, .035, 'triangle');
+  }
+
   private tryAction(): void {
     if (!this.keys.has('Space') || this.actionCooldown > 0 || this.disguised) return;
+    if (this.playerCarrying) {
+      this.dropPlayerSheep();
+      this.actionCooldown = .3;
+      this.keys.delete('Space');
+      return;
+    }
     if (this.rival.mesh.visible && this.rival.mesh.position.distanceTo(this.wolf.position) < 1.85) {
       this.rival.hp -= 1;
       this.rival.state = this.rival.hp <= 0 ? 'retreat' : 'fight';
@@ -849,6 +1074,7 @@ class PrototypeGame {
       this.actionCooldown = .55;
       this.keys.delete('Space');
       this.playTone(165, .1, .055, 'square');
+      this.emitNoise(this.wolf.position, 6, 35, true, true);
       return;
     }
     let nearest: Sheep | undefined;
@@ -862,18 +1088,28 @@ class PrototypeGame {
       }
     }
     if (!nearest) return;
-    nearest.alive = false;
-    nearest.mesh.visible = false;
+    this.playerCarrying = nearest;
+    nearest.carriedBy = 'player';
+    nearest.state = 'carried';
+    nearest.velocity.set(0, 0, 0);
+    this.emitNoise(this.wolf.position, 4, 25, true, true);
+    this.playTone(230, .11, .04, 'triangle');
+    this.actionCooldown = .45;
+    this.keys.delete('Space');
+  }
+
+  private completeEating(): void {
+    const sheep = this.playerCarrying;
+    if (!sheep) return;
+    sheep.alive = false;
+    sheep.carriedBy = null;
+    sheep.mesh.visible = false;
+    this.playerCarrying = undefined;
     this.score += 1;
     this.health = Math.min(this.maxHealth, this.health + 2);
-    if (this.dog.position.distanceTo(this.wolf.position) < 5) {
-      this.dogLastSeen.copy(this.wolf.position);
-      this.dogSuspicion = Math.min(100, this.dogSuspicion + 45);
-      if (this.dogState === 'patrol') this.dogState = 'alert';
-    }
+    this.emitNoise(this.wolf.position, 5, 45, true, true);
     this.playTone(245 + this.score * 55, .16, .06);
     this.actionCooldown = 1.1;
-    this.keys.delete('Space');
     if (this.score >= GOAL) {
       const title = this.perfectPossible ? 'Идеальная охота' : 'Охота завершена';
       const text = this.perfectPossible
@@ -883,6 +1119,20 @@ class PrototypeGame {
     } else {
       this.checkNoSheepResult();
     }
+  }
+
+  private dropPlayerSheep(): void {
+    const sheep = this.playerCarrying;
+    if (!sheep) return;
+    sheep.carriedBy = null;
+    sheep.state = 'flee';
+    sheep.mesh.visible = true;
+    const forward = new THREE.Vector3(Math.cos(this.wolf.rotation.y), 0, -Math.sin(this.wolf.rotation.y));
+    sheep.mesh.position.copy(this.wolf.position).addScaledVector(forward, 1.1).setY(0);
+    sheep.velocity.copy(forward).multiplyScalar(1.8);
+    sheep.turnIn = .65;
+    this.playerCarrying = undefined;
+    this.eatProgress = 0;
   }
 
   private spawnRival(): void {
@@ -896,9 +1146,9 @@ class PrototypeGame {
     this.rival.mesh.position.copy(spawn);
     this.rival.mesh.visible = true;
     this.rival.state = 'approach';
-    this.rival.hp = 3;
+    this.rival.hp = 3 + Math.floor(this.guardLevel / 2);
     this.rival.exitTimer = 0;
-    this.rival.spawnedThisNight = true;
+    this.rivalEntriesThisNight += 1;
     this.rival.target = this.chooseRivalTarget();
     this.rival.exit = this.nearestExit(spawn);
     this.playTone(145, .45, .035, 'triangle');
@@ -911,6 +1161,7 @@ class PrototypeGame {
     this.rival.target = undefined;
     this.rival.velocity.set(0, 0, 0);
     this.rival.exitTimer = 0;
+    this.nextRivalSpawn = Math.min(101, (this.elapsed % CYCLE_TIME) + 9);
   }
 
   private dropRivalSheep(): void {
@@ -1056,6 +1307,38 @@ class PrototypeGame {
     return best;
   }
 
+  private emitNoise(
+    position: THREE.Vector3,
+    radius: number,
+    suspicion: number,
+    investigate = true,
+    scareSheep = false,
+  ): void {
+    if (this.dog.position.distanceTo(position) <= radius) {
+      this.dogLastSeen.copy(position);
+      this.dogSuspicion = Math.min(100, this.dogSuspicion + suspicion);
+      if (investigate && (this.dogState === 'patrol' || this.dogState === 'return')) {
+        this.dogState = 'alert';
+        this.dogSearchTime = 0;
+      }
+    }
+    if (investigate && this.shepherd.visible && this.shepherd.position.distanceTo(position) <= radius + 2
+      && this.shepherdState !== 'aim') {
+      this.shepherdState = 'investigate';
+    }
+    if (scareSheep) {
+      for (const sheep of this.sheep) {
+        if (!sheep.alive || sheep.carriedBy) continue;
+        const distance = sheep.mesh.position.distanceTo(position);
+        if (distance > radius) continue;
+        sheep.state = 'flee';
+        sheep.turnIn = Math.max(sheep.turnIn, 1.2);
+        const away = sheep.mesh.position.clone().sub(position).setY(0);
+        if (away.lengthSq() > .001) sheep.velocity.addScaledVector(away.normalize(), 1.3);
+      }
+    }
+  }
+
   private checkNoSheepResult(): void {
     if (this.score >= GOAL) return;
     const remaining = this.sheep.filter((sheep) => sheep.alive).length;
@@ -1065,6 +1348,13 @@ class PrototypeGame {
   }
 
   private updatePhase(): void {
+    const currentCycle = Math.floor(this.elapsed / CYCLE_TIME);
+    if (currentCycle > this.cycleIndex) {
+      this.cycleIndex = currentCycle;
+      this.dayNumber = currentCycle + 1;
+      this.guardLevel = Math.min(3, currentCycle);
+      this.repairKits = Math.min(2, this.repairKits + 1);
+    }
     const t = this.elapsed % CYCLE_TIME;
     if (t < 50) this.phase = 'День';
     else if (t < 60) this.phase = 'Сумерки';
@@ -1073,10 +1363,10 @@ class PrototypeGame {
 
     if (this.phase !== this.previousPhase) {
       if (this.phase === 'Ночь') {
-        this.rival.spawnedThisNight = false;
+        this.rivalEntriesThisNight = 0;
+        this.nextRivalSpawn = 66;
         this.playTone(170, .3, .025, 'triangle');
       }
-      if (this.phase === 'День') this.rival.spawnedThisNight = false;
       this.previousPhase = this.phase;
     }
 
@@ -1100,12 +1390,21 @@ class PrototypeGame {
   private updateUi(): void {
     const seconds = Math.floor(this.elapsed % CYCLE_TIME);
     ui.phase.textContent = this.phase;
+    ui.day.textContent = `День ${this.dayNumber} · охрана ${this.guardLevel + 1}`;
     ui.time.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
     ui.sheep.textContent = `Добыча: ${this.score} / ${GOAL}`;
     ui.lost.textContent = `Потери: ${this.lostSheep}`;
     ui.health.textContent = `Здоровье: ${this.health} / ${this.maxHealth}`;
     ui.form.textContent = `Маскировка: ${this.disguised ? 'надета' : 'снята'}`;
-    ui.progress.style.width = `${Math.min(100, this.changeProgress / CHANGE_TIME * 100)}%`;
+    const costumeLabels = ['порвана', 'повреждена', 'цела'];
+    ui.costume.textContent = `Шкура: ${costumeLabels[this.costumeIntegrity]} · ремкомплекты ${this.repairKits}`;
+    ui.carrying.textContent = `Добыча в зубах: ${this.playerCarrying ? 'да' : 'нет'}`;
+    const progress = this.eatProgress > 0
+      ? this.eatProgress / 1.6
+      : this.repairProgress > 0
+        ? this.repairProgress / 2
+        : this.changeProgress / CHANGE_TIME;
+    ui.progress.style.width = `${Math.min(100, progress * 100)}%`;
 
     const dogLabels: Record<DogState, string> = {
       patrol: 'патрулирует',
@@ -1125,11 +1424,21 @@ class PrototypeGame {
       'escape-warning': `почти у выхода · ${Math.max(0, 1.2 - this.rival.exitTimer).toFixed(1)} с`,
     };
     ui.rival.textContent = `Соперник: ${rivalLabels[this.rival.state]}`;
-    ui.dash.textContent = `Рывок: ${this.dashCooldown <= 0 ? 'готов' : `${this.dashCooldown.toFixed(1)} с`}`;
-    if (this.changeProgress > 0) ui.hint.textContent = `Переодевание: ${Math.ceil(CHANGE_TIME - this.changeProgress)} с`;
-    else if (this.shepherdState === 'aim') ui.hint.textContent = `Пастух целится: ${Math.max(0, .9 - this.shepherdAim).toFixed(1)} с — уйдите за укрытие!`;
+    ui.dash.textContent = `Рывок: ${this.dashCooldown <= 0 ? 'готов' : `${this.dashCooldown.toFixed(1)} с`} · приманка: ${this.bleatCooldown <= 0 ? 'готова' : `${this.bleatCooldown.toFixed(1)} с`}`;
+    const nearBarn = this.wolf.position.distanceTo(new THREE.Vector3(11, 0, -8)) < 4.5;
+    if (this.playerHeld > 0) ui.hint.textContent = `Пёс удерживает: ${this.playerHeld.toFixed(1)} с — Shift для рывка!`;
+    else if (this.eatProgress > 0) ui.hint.textContent = `Поедание: ${Math.max(0, 1.6 - this.eatProgress).toFixed(1)} с`;
+    else if (this.repairProgress > 0) ui.hint.textContent = `Ремонт маскировки: ${Math.max(0, 2 - this.repairProgress).toFixed(1)} с`;
+    else if (this.changeProgress > 0) ui.hint.textContent = `Переодевание: ${Math.ceil(CHANGE_TIME - this.changeProgress)} с`;
+    else if (this.isGrazing) ui.hint.textContent = 'Притворно пасётесь: подозрение снижается';
+    else if (this.shepherdState === 'aim') {
+      const aimDuration = this.playerHeld > 0 ? .45 : .9;
+      ui.hint.textContent = `Пастух целится: ${Math.max(0, aimDuration - this.shepherdAim).toFixed(1)} с — уйдите за укрытие!`;
+    }
     else if (this.rival.state === 'escape-warning') ui.hint.textContent = 'Соперник почти ушёл! Снимите костюм и ударьте Пробелом';
-    else if (!this.disguised) ui.hint.textContent = 'Пробел рядом с овцой — забрать добычу';
+    else if (this.playerCarrying) ui.hint.textContent = 'Удерживайте E, чтобы съесть овцу; Пробел — бросить';
+    else if (nearBarn && this.disguised && this.costumeIntegrity < 2 && this.repairKits > 0) ui.hint.textContent = 'Удерживайте E у сарая, чтобы починить шкуру';
+    else if (!this.disguised) ui.hint.textContent = 'Пробел рядом с овцой — схватить; рядом с соперником — ударить';
     else if (this.phase === 'Ночь') ui.hint.textContent = 'Ночью пёс ищет активнее. Не отходите от стада';
     else ui.hint.textContent = 'Удерживайте F неподвижно, чтобы снять маскировку';
   }
@@ -1137,6 +1446,7 @@ class PrototypeGame {
   private finish(won: boolean, title: string, text: string): void {
     this.running = false;
     this.finished = true;
+    this.paused = false;
     ui.overlayTitle.textContent = title;
     ui.overlayText.textContent = text;
     ui.start.textContent = won ? 'Сыграть ещё раз' : 'Попробовать снова';
@@ -1163,10 +1473,36 @@ class PrototypeGame {
   }
 
   private showIntro(): void {
+    this.running = false;
+    this.paused = false;
     ui.overlayTitle.textContent = 'Волк в овечьей шкуре';
     ui.overlayText.textContent = 'Днём смешивайтесь со стадом и выбирайте момент для охоты. Ночью сторожевой пёс становится активнее — теперь охотятся уже на вас.';
     ui.start.textContent = 'Начать забег';
     ui.overlay.classList.remove('hidden');
+  }
+
+  private togglePause(): void {
+    if (this.finished) return;
+    if (this.paused) {
+      this.resume();
+      return;
+    }
+    if (!this.running) return;
+    this.running = false;
+    this.paused = true;
+    this.keys.clear();
+    ui.overlayTitle.textContent = 'Пауза';
+    ui.overlayText.textContent = 'Забег остановлен. Прогресс сохранён.';
+    ui.start.textContent = 'Продолжить';
+    ui.overlay.classList.remove('hidden');
+  }
+
+  private resume(): void {
+    this.paused = false;
+    this.running = true;
+    this.keys.clear();
+    ui.overlay.classList.add('hidden');
+    this.clock.getDelta();
   }
 
   private resetSheep(): void {
