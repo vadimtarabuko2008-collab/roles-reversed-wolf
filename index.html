@@ -19,6 +19,7 @@
         <span id="phase">День</span>
         <span id="time">00:00</span>
         <span id="sheep">Добыча: 0 / 4</span>
+        <span id="lost">Потери: 0</span>
         <span id="health">Здоровье: 6 / 6</span>
         <button id="sound" class="sound-button" type="button" aria-pressed="true">Звук: вкл</button>
       </div>
@@ -26,7 +27,9 @@
 
     <section class="status-panel">
       <div id="form">Маскировка: надета</div>
-      <div id="danger">Подозрение: низкое</div>
+      <div id="danger">Пёс: патрулирует</div>
+      <div id="rival-status">Соперник: пока не замечен</div>
+      <div id="dash-status">Рывок: готов</div>
       <div class="progress" aria-hidden="true"><div id="change-progress"></div></div>
       <div id="hint">Двигайтесь WASD или стрелками</div>
     </section>
@@ -41,8 +44,9 @@
         </p>
         <div class="controls">
           <span><kbd>WASD</kbd> движение</span>
+          <span><kbd>Shift</kbd> рывок с перезарядкой</span>
           <span><kbd>F</kbd> удерживать 3 с — переодеться</span>
-          <span><kbd>Пробел</kbd> забрать овцу без маскировки</span>
+          <span><kbd>Пробел</kbd> действие или атака</span>
           <span><kbd>R</kbd> начать заново</span>
         </div>
         <button id="start" type="button">Начать забег</button>
