@@ -48,6 +48,20 @@ canvas { display: block; }
   font-size: 13px;
 }
 
+.sound-button {
+  width: auto;
+  padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, .15);
+  border-radius: 999px;
+  background: rgba(13, 18, 12, .7);
+  color: #f4f0df;
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: auto;
+}
+
+.sound-button:hover { background: rgba(54, 68, 47, .9); }
+
 .status-panel {
   position: fixed;
   z-index: 4;
@@ -104,8 +118,8 @@ h1 { margin: 8px 0 14px; font-family: Georgia, serif; font-size: clamp(34px, 7vw
 .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 24px 0; }
 .controls span { color: #bfc7b6; font-size: 13px; }
 kbd { display: inline-block; min-width: 34px; margin-right: 5px; padding: 5px 7px; border: 1px solid #68735f; border-radius: 7px; background: #20291d; color: #fff; text-align: center; }
-button { width: 100%; padding: 14px 20px; border: 0; border-radius: 12px; background: #d7b36b; color: #17140e; font: inherit; font-weight: 800; cursor: pointer; }
-button:hover { background: #efd28c; }
+.card button { width: 100%; padding: 14px 20px; border: 0; border-radius: 12px; background: #d7b36b; color: #17140e; font: inherit; font-weight: 800; cursor: pointer; }
+.card button:hover { background: #efd28c; }
 
 @media (max-width: 720px) {
   .hud { align-items: flex-start; }

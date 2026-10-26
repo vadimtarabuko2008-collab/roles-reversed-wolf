@@ -26,6 +26,7 @@ const ui = {
   danger: required('danger'),
   hint: required('hint'),
   progress: required('change-progress'),
+  sound: requiredButton('sound'),
   overlay: required('overlay'),
   overlayTitle: required('overlay-title'),
   overlayText: required('overlay-text'),
@@ -68,6 +69,8 @@ class PrototypeGame {
   private biteCooldown = 0;
   private actionCooldown = 0;
   private phase: Phase = 'День';
+  private audioContext?: AudioContext;
+  private soundEnabled = true;
 
   constructor(container: HTMLElement) {
     const aspect = window.innerWidth / window.innerHeight;
@@ -90,6 +93,9 @@ class PrototypeGame {
   }
 
   start(): void {
+    this.ensureAudio();
+    this.playTone(392, .1, .05);
+    window.setTimeout(() => this.playTone(523, .13, .04), 90);
     this.reset();
     this.running = true;
     ui.overlay.classList.add('hidden');
@@ -230,6 +236,15 @@ class PrototypeGame {
     window.addEventListener('blur', () => this.keys.clear());
     window.addEventListener('resize', () => this.resize());
     ui.start.addEventListener('click', () => this.start());
+    ui.sound.addEventListener('click', () => {
+      this.soundEnabled = !this.soundEnabled;
+      ui.sound.textContent = `Звук: ${this.soundEnabled ? 'вкл' : 'выкл'}`;
+      ui.sound.setAttribute('aria-pressed', String(this.soundEnabled));
+      if (this.soundEnabled) {
+        this.ensureAudio();
+        this.playTone(520, .08, .035);
+      }
+    });
   }
 
   private frame(): void {
@@ -284,6 +299,7 @@ class PrototypeGame {
       this.changeProgress = 0;
       this.keys.delete('KeyF');
       this.setDisguiseVisual();
+      this.playTone(this.disguised ? 620 : 310, .12, .035);
     }
   }
 
@@ -339,6 +355,7 @@ class PrototypeGame {
       this.maxHealth = Math.max(0, this.maxHealth - 1);
       this.health = Math.min(this.health - 1, this.maxHealth);
       this.biteCooldown = 1.35;
+      this.playTone(105, .2, .075, 'sawtooth');
       this.wolf.position.addScaledVector(toWolf.normalize(), 1.4);
       if (this.health <= 0) this.finish(false, 'Пёс раскрыл волка', 'Каждый укус оставляет постоянную рану. В следующий раз чаще возвращайтесь в стадо и меняйте облик заранее.');
     }
@@ -360,6 +377,7 @@ class PrototypeGame {
     nearest.alive = false;
     nearest.mesh.visible = false;
     this.score += 1;
+    this.playTone(245 + this.score * 55, .16, .06);
     this.actionCooldown = 1.1;
     this.keys.delete('Space');
     if (this.score >= GOAL) this.finish(true, 'Идеальная охота', 'Вы добыли нужное количество овец и пережили смену ролей. Забег завершён.');
@@ -414,6 +432,25 @@ class PrototypeGame {
     ui.overlayText.textContent = text;
     ui.start.textContent = won ? 'Сыграть ещё раз' : 'Попробовать снова';
     ui.overlay.classList.remove('hidden');
+    this.playTone(won ? 659 : 130, .35, .065, won ? 'sine' : 'sawtooth');
+  }
+
+  private ensureAudio(): void {
+    if (!this.audioContext) this.audioContext = new AudioContext();
+    if (this.audioContext.state === 'suspended') void this.audioContext.resume();
+  }
+
+  private playTone(frequency: number, duration: number, volume: number, type: OscillatorType = 'sine'): void {
+    if (!this.soundEnabled || !this.audioContext) return;
+    const oscillator = this.audioContext.createOscillator();
+    const gain = this.audioContext.createGain();
+    oscillator.type = type;
+    oscillator.frequency.value = frequency;
+    gain.gain.setValueAtTime(volume, this.audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(.0001, this.audioContext.currentTime + duration);
+    oscillator.connect(gain).connect(this.audioContext.destination);
+    oscillator.start();
+    oscillator.stop(this.audioContext.currentTime + duration);
   }
 
   private showIntro(): void {
